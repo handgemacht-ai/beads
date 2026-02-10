@@ -67,12 +67,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		ctx := rootCtx
 
 		// rename-prefix requires direct mode (not supported by daemon)
-		if daemonClient != nil {
-			if err := ensureDirectMode("daemon does not support rename-prefix command"); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else if store == nil {
+		if store == nil {
 			if err := ensureStoreActive(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -188,7 +183,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		if dryRun {
-				fmt.Printf("DRY RUN: Would rename %d issues from prefix '%s' to '%s'\n\n", len(issues), oldPrefix, newPrefix)
+			fmt.Printf("DRY RUN: Would rename %d issues from prefix '%s' to '%s'\n\n", len(issues), oldPrefix, newPrefix)
 			fmt.Printf("Sample changes:\n")
 			for i, issue := range issues {
 				if i >= 5 {
@@ -201,7 +196,6 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			}
 			return
 		}
-
 
 		fmt.Printf("Renaming %d issues from prefix '%s' to '%s'...\n", len(issues), oldPrefix, newPrefix)
 
@@ -237,8 +231,6 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				}
 			}
 		}
-		// Also schedule for flush manager if available
-		markDirtyAndScheduleFullExport()
 
 		fmt.Printf("%s Successfully renamed prefix from %s to %s\n", ui.RenderPass("✓"), ui.RenderAccent(oldPrefix), ui.RenderAccent(newPrefix))
 
@@ -466,8 +458,6 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 			}
 		}
 	}
-	// Also schedule for flush manager if available
-	markDirtyAndScheduleFullExport()
 
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
 		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))

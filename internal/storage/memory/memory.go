@@ -516,6 +516,43 @@ func (m *MemoryStorage) CloseIssue(ctx context.Context, id string, reason string
 	return m.UpdateIssue(ctx, id, updates, actor)
 }
 
+// ClaimIssue atomically claims an issue using compare-and-swap semantics.
+// It sets the assignee to actor and status to "in_progress" only if the issue
+// currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
+func (m *MemoryStorage) ClaimIssue(ctx context.Context, id string, actor string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	issue, exists := m.issues[id]
+	if !exists {
+		return fmt.Errorf("issue %s not found", id)
+	}
+
+	// Compare-and-swap: only claim if currently unassigned
+	if issue.Assignee != "" {
+		return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, issue.Assignee)
+	}
+
+	// Perform the claim
+	now := time.Now()
+	issue.Assignee = actor
+	issue.Status = types.StatusInProgress
+	issue.UpdatedAt = now
+
+	m.dirty[id] = true
+
+	// Record claim event
+	event := &types.Event{
+		IssueID:   id,
+		EventType: "claimed",
+		Actor:     actor,
+		CreatedAt: now,
+	}
+	m.events[id] = append(m.events[id], event)
+
+	return nil
+}
+
 // CreateTombstone converts an existing issue to a tombstone record.
 // This is a soft-delete that preserves the issue with status="tombstone".
 func (m *MemoryStorage) CreateTombstone(ctx context.Context, id string, actor string, reason string) error {
@@ -634,6 +671,26 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 			}
 		}
 
+		// Label filtering (OR semantics): must have AT LEAST ONE of the specified labels
+		if len(filter.LabelsAny) > 0 {
+			issueLabels := m.labels[issue.ID]
+			hasAnyLabel := false
+			for _, reqLabel := range filter.LabelsAny {
+				for _, label := range issueLabels {
+					if label == reqLabel {
+						hasAnyLabel = true
+						break
+					}
+				}
+				if hasAnyLabel {
+					break
+				}
+			}
+			if !hasAnyLabel {
+				continue
+			}
+		}
+
 		// ID filtering
 		if len(filter.IDs) > 0 {
 			found := false
@@ -654,8 +711,14 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 				continue
 			}
 		}
+		if filter.SpecIDPrefix != "" {
+			if !strings.HasPrefix(issue.SpecID, filter.SpecIDPrefix) {
+				continue
+			}
+		}
 
 		// Parent filtering (bd-yqhh): filter children by parent issue
+		// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent")
 		if filter.ParentID != nil {
 			isChild := false
 			for _, dep := range m.dependencies[issue.ID] {
@@ -663,6 +726,10 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 					isChild = true
 					break
 				}
+			}
+			// Also check dotted-ID naming convention
+			if !isChild && strings.HasPrefix(issue.ID, *filter.ParentID+".") {
+				isChild = true
 			}
 			if !isChild {
 				continue
@@ -1899,6 +1966,36 @@ func (m *MemoryStorage) RunInTransaction(ctx context.Context, fn func(tx storage
 }
 
 // REMOVED (bd-c7af): SyncAllCounters - no longer needed with hash IDs
+
+// DeleteIssuesBySourceRepo removes all issues from a specific source repository.
+func (m *MemoryStorage) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var toDelete []string
+	for id, issue := range m.issues {
+		if issue.SourceRepo == sourceRepo {
+			toDelete = append(toDelete, id)
+		}
+	}
+
+	for _, id := range toDelete {
+		delete(m.issues, id)
+		delete(m.dependencies, id)
+		delete(m.labels, id)
+		delete(m.events, id)
+		delete(m.comments, id)
+		delete(m.dirty, id)
+		delete(m.externalRefToID, id)
+	}
+
+	return len(toDelete), nil
+}
+
+// ClearRepoMtime is a no-op for MemoryStorage (no mtime cache).
+func (m *MemoryStorage) ClearRepoMtime(ctx context.Context, repoPath string) error {
+	return nil
+}
 
 // MarkIssueDirty marks an issue as dirty for export
 func (m *MemoryStorage) MarkIssueDirty(ctx context.Context, issueID string) error {

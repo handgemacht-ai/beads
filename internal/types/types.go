@@ -23,6 +23,7 @@ type Issue struct {
 	Design             string `json:"design,omitempty"`
 	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
 	Notes              string `json:"notes,omitempty"`
+	SpecID             string `json:"spec_id,omitempty"`
 
 	// ===== Status & Workflow =====
 	Status    Status    `json:"status,omitempty"`
@@ -35,9 +36,9 @@ type Issue struct {
 	EstimatedMinutes *int   `json:"estimated_minutes,omitempty"`
 
 	// ===== Timestamps =====
-	CreatedAt   time.Time  `json:"created_at"`
-	CreatedBy   string     `json:"created_by,omitempty"` // Who created this issue (GH#748)
-	UpdatedAt   time.Time  `json:"updated_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CreatedBy       string     `json:"created_by,omitempty"` // Who created this issue (GH#748)
+	UpdatedAt       time.Time  `json:"updated_at"`
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
@@ -78,8 +79,9 @@ type Issue struct {
 	OriginalType string     `json:"original_type,omitempty"` // Issue type before deletion
 
 	// ===== Messaging Fields (inter-agent communication) =====
-	Sender    string `json:"sender,omitempty"`    // Who sent this (for messages)
-	Ephemeral bool   `json:"ephemeral,omitempty"` // If true, not exported to JSONL
+	Sender    string   `json:"sender,omitempty"`    // Who sent this (for messages)
+	Ephemeral bool     `json:"ephemeral,omitempty"` // If true, not exported to JSONL
+	WispType  WispType `json:"wisp_type,omitempty"` // Classification for TTL-based compaction (gt-9br)
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
@@ -143,6 +145,7 @@ func (i *Issue) ComputeContentHash() string {
 	w.str(i.Design)
 	w.str(i.AcceptanceCriteria)
 	w.str(i.Notes)
+	w.str(i.SpecID)
 	w.str(string(i.Status))
 	w.int(i.Priority)
 	w.str(string(i.IssueType))
@@ -635,6 +638,35 @@ func (m MolType) IsValid() bool {
 	return false
 }
 
+// WispType categorizes ephemeral wisps for TTL-based compaction (gt-9br)
+type WispType string
+
+// WispType constants - see WISP-COMPACTION-POLICY.md for TTL assignments
+const (
+	// Category 1: High-churn, low forensic value (TTL: 6h)
+	WispTypeHeartbeat WispType = "heartbeat" // Liveness pings
+	WispTypePing      WispType = "ping"      // Health check ACKs
+
+	// Category 2: Operational state (TTL: 24h)
+	WispTypePatrol   WispType = "patrol"    // Patrol cycle reports
+	WispTypeGCReport WispType = "gc_report" // Garbage collection reports
+
+	// Category 3: Significant events (TTL: 7d)
+	WispTypeRecovery   WispType = "recovery"   // Force-kill, recovery actions
+	WispTypeError      WispType = "error"      // Error reports
+	WispTypeEscalation WispType = "escalation" // Human escalations
+)
+
+// IsValid checks if the wisp type value is valid
+func (w WispType) IsValid() bool {
+	switch w {
+	case WispTypeHeartbeat, WispTypePing, WispTypePatrol, WispTypeGCReport,
+		WispTypeRecovery, WispTypeError, WispTypeEscalation, "":
+		return true // empty is valid (uses default TTL)
+	}
+	return false
+}
+
 // WorkType categorizes how work assignment operates for a bead (Decision 006)
 type WorkType string
 
@@ -693,7 +725,7 @@ type IssueWithCounts struct {
 // Used for JSON serialization in bd show and RPC responses.
 type IssueDetails struct {
 	Issue
-	Labels       []string                      `json:"labels,omitempty"`
+	Labels       []string                       `json:"labels,omitempty"`
 	Dependencies []*IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 	Dependents   []*IssueWithDependencyMetadata `json:"dependents,omitempty"`
 	Comments     []*Comment                     `json:"comments,omitempty"`
@@ -716,10 +748,10 @@ const (
 	DepDiscoveredFrom DependencyType = "discovered-from"
 
 	// Graph link types
-	DepRepliesTo  DependencyType = "replies-to"  // Conversation threading
-	DepRelatesTo  DependencyType = "relates-to"  // Loose knowledge graph edges
-	DepDuplicates DependencyType = "duplicates"  // Deduplication link
-	DepSupersedes DependencyType = "supersedes"  // Version chain link
+	DepRepliesTo  DependencyType = "replies-to" // Conversation threading
+	DepRelatesTo  DependencyType = "relates-to" // Loose knowledge graph edges
+	DepDuplicates DependencyType = "duplicates" // Deduplication link
+	DepSupersedes DependencyType = "supersedes" // Version chain link
 
 	// Entity types (HOP foundation - Decision 004)
 	DepAuthoredBy DependencyType = "authored-by" // Creator relationship
@@ -846,14 +878,14 @@ type Comment struct {
 
 // Event represents an audit trail entry
 type Event struct {
-	ID        int64      `json:"id"`
-	IssueID   string     `json:"issue_id"`
-	EventType EventType  `json:"event_type"`
-	Actor     string     `json:"actor"`
-	OldValue  *string    `json:"old_value,omitempty"`
-	NewValue  *string    `json:"new_value,omitempty"`
-	Comment   *string    `json:"comment,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID        int64     `json:"id"`
+	IssueID   string    `json:"issue_id"`
+	EventType EventType `json:"event_type"`
+	Actor     string    `json:"actor"`
+	OldValue  *string   `json:"old_value,omitempty"`
+	NewValue  *string   `json:"new_value,omitempty"`
+	Comment   *string   `json:"comment,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // EventType categorizes audit trail events
@@ -904,37 +936,40 @@ type MoleculeProgressStats struct {
 
 // Statistics provides aggregate metrics
 type Statistics struct {
-	TotalIssues              int     `json:"total_issues"`
-	OpenIssues               int     `json:"open_issues"`
-	InProgressIssues         int     `json:"in_progress_issues"`
-	ClosedIssues             int     `json:"closed_issues"`
-	BlockedIssues            int     `json:"blocked_issues"`
-	DeferredIssues           int     `json:"deferred_issues"`  // Issues on ice
-	ReadyIssues              int     `json:"ready_issues"`
-	TombstoneIssues          int     `json:"tombstone_issues"` // Soft-deleted issues
-	PinnedIssues             int     `json:"pinned_issues"`    // Persistent issues
-	EpicsEligibleForClosure  int     `json:"epics_eligible_for_closure"`
-	AverageLeadTime          float64 `json:"average_lead_time_hours"`
+	TotalIssues             int     `json:"total_issues"`
+	OpenIssues              int     `json:"open_issues"`
+	InProgressIssues        int     `json:"in_progress_issues"`
+	ClosedIssues            int     `json:"closed_issues"`
+	BlockedIssues           int     `json:"blocked_issues"`
+	DeferredIssues          int     `json:"deferred_issues"` // Issues on ice
+	ReadyIssues             int     `json:"ready_issues"`
+	TombstoneIssues         int     `json:"tombstone_issues"` // Soft-deleted issues
+	PinnedIssues            int     `json:"pinned_issues"`    // Persistent issues
+	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
+	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 }
 
 // IssueFilter is used to filter issue queries
 type IssueFilter struct {
-	Status      *Status
-	Priority    *int
-	IssueType   *IssueType
-	Assignee    *string
-	Labels      []string  // AND semantics: issue must have ALL these labels
-	LabelsAny   []string  // OR semantics: issue must have AT LEAST ONE of these labels
-	TitleSearch string
-	IDs         []string  // Filter by specific issue IDs
-	IDPrefix    string    // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
-	Limit       int
+	Status       *Status
+	Priority     *int
+	IssueType    *IssueType
+	Assignee     *string
+	Labels       []string // AND semantics: issue must have ALL these labels
+	LabelsAny    []string // OR semantics: issue must have AT LEAST ONE of these labels
+	LabelPattern string   // Glob pattern for label matching (e.g., "tech-*")
+	LabelRegex   string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
+	TitleSearch  string
+	IDs          []string // Filter by specific issue IDs
+	IDPrefix     string   // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
+	SpecIDPrefix string   // Filter by spec_id prefix
+	Limit        int
 
 	// Pattern matching
 	TitleContains       string
 	DescriptionContains string
 	NotesContains       string
-	
+
 	// Date ranges
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
@@ -942,18 +977,21 @@ type IssueFilter struct {
 	UpdatedBefore *time.Time
 	ClosedAfter   *time.Time
 	ClosedBefore  *time.Time
-	
+
 	// Empty/null checks
 	EmptyDescription bool
 	NoAssignee       bool
 	NoLabels         bool
-	
+
 	// Numeric ranges
 	PriorityMin *int
 	PriorityMax *int
 
 	// Tombstone filtering
 	IncludeTombstones bool // If false (default), exclude tombstones from results
+
+	// Source repo filtering (for multi-repo support)
+	SourceRepo *string // Filter by source_repo field (nil = any)
 
 	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
@@ -969,6 +1007,9 @@ type IssueFilter struct {
 
 	// Molecule type filtering
 	MolType *MolType // Filter by molecule type (nil = any, swarm/patrol/work)
+
+	// Wisp type filtering (TTL-based compaction classification)
+	WispType *WispType // Filter by wisp type (nil = any, heartbeat/ping/patrol/gc_report/recovery/error/escalation)
 
 	// Status exclusion (for default non-closed behavior)
 	ExcludeStatus []Status // Exclude issues with these statuses
@@ -1015,21 +1056,26 @@ func (s SortPolicy) IsValid() bool {
 
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status     Status
-	Type       string     // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
-	Priority   *int
-	Assignee   *string
-	Unassigned bool       // Filter for issues with no assignee
-	Labels     []string   // AND semantics: issue must have ALL these labels
-	LabelsAny  []string   // OR semantics: issue must have AT LEAST ONE of these labels
-	Limit      int
-	SortPolicy SortPolicy
+	Status       Status
+	Type         string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
+	Priority     *int
+	Assignee     *string
+	Unassigned   bool     // Filter for issues with no assignee
+	Labels       []string // AND semantics: issue must have ALL these labels
+	LabelsAny    []string // OR semantics: issue must have AT LEAST ONE of these labels
+	LabelPattern string   // Glob pattern for label matching (e.g., "tech-*")
+	LabelRegex   string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
+	Limit        int
+	SortPolicy   SortPolicy
 
 	// Parent filtering: filter to descendants of a bead/epic (recursive)
 	ParentID *string // Show all descendants of this issue
 
 	// Molecule type filtering
 	MolType *MolType // Filter by molecule type (nil = any, swarm/patrol/work)
+
+	// Wisp type filtering (TTL-based compaction classification)
+	WispType *WispType // Filter by wisp type (nil = any, heartbeat/ping/patrol/gc_report/recovery/error/escalation)
 
 	// Time-based deferral filtering (GH#820)
 	IncludeDeferred bool // If true, include issues with future defer_until timestamps

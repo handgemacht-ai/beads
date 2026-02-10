@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/compact"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -109,16 +109,12 @@ Examples:
 
 		// Handle compact stats first
 		if compactStats {
-			if daemonClient != nil {
-				runCompactStatsRPC()
-			} else {
-				sqliteStore, ok := store.(*sqlite.SQLiteStorage)
-				if !ok {
-					fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
-					os.Exit(1)
-				}
-				runCompactStats(ctx, sqliteStore)
+			compactStore, ok := store.(storage.CompactableStorage)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "Error: compact requires CompactableStorage (not supported by current backend)\n")
+				os.Exit(1)
 			}
+			runCompactStats(ctx, compactStore)
 			return
 		}
 
@@ -169,13 +165,12 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Hint: Use --no-daemon flag to bypass daemon and access database directly\n")
 				os.Exit(1)
 			}
-			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+			compactStore, ok := store.(storage.CompactableStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
-				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
+				fmt.Fprintf(os.Stderr, "Error: compact --analyze requires CompactableStorage (not supported by current backend)\n")
 				os.Exit(1)
 			}
-			runCompactAnalyze(ctx, sqliteStore)
+			runCompactAnalyze(ctx, compactStore)
 			return
 		}
 
@@ -194,13 +189,12 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error: --apply requires --summary\n")
 				os.Exit(1)
 			}
-			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+			compactStore, ok := store.(storage.CompactableStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
-				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
+				fmt.Fprintf(os.Stderr, "Error: compact --apply requires CompactableStorage (not supported by current backend)\n")
 				os.Exit(1)
 			}
-			runCompactApply(ctx, sqliteStore)
+			runCompactApply(ctx, compactStore)
 			return
 		}
 
@@ -220,22 +214,16 @@ Examples:
 				os.Exit(1)
 			}
 
-			// Use RPC if daemon available, otherwise direct mode
-			if daemonClient != nil {
-				runCompactRPC(ctx)
-				return
-			}
-
-			// Fallback to direct mode
+			// Direct mode
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
 			if apiKey == "" && !compactDryRun {
 				fmt.Fprintf(os.Stderr, "Error: --auto mode requires ANTHROPIC_API_KEY environment variable\n")
 				os.Exit(1)
 			}
 
-			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
+			compactStore, ok := store.(storage.CompactableStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
+				fmt.Fprintf(os.Stderr, "Error: compact requires CompactableStorage (not supported by current backend)\n")
 				os.Exit(1)
 			}
 
@@ -245,23 +233,23 @@ Examples:
 				DryRun:      compactDryRun,
 			}
 
-			compactor, err := compact.New(sqliteStore, apiKey, config)
+			compactor, err := compact.New(compactStore, apiKey, config)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to create compactor: %v\n", err)
 				os.Exit(1)
 			}
 
 			if compactID != "" {
-				runCompactSingle(ctx, compactor, sqliteStore, compactID)
+				runCompactSingle(ctx, compactor, compactStore, compactID)
 				return
 			}
 
-			runCompactAll(ctx, compactor, sqliteStore)
+			runCompactAll(ctx, compactor, compactStore)
 		}
 	},
 }
 
-func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *sqlite.SQLiteStorage, issueID string) {
+func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store storage.CompactableStorage, issueID string) {
 	start := time.Now()
 
 	if !compactForce {
@@ -355,12 +343,9 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 		fmt.Printf("\nTombstones pruned: %d expired (older than %d days)\n",
 			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
 	}
-
-	// Schedule auto-flush to export changes
-	markDirtyAndScheduleFlush()
 }
 
-func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sqlite.SQLiteStorage) {
+func runCompactAll(ctx context.Context, compactor *compact.Compactor, store storage.CompactableStorage) {
 	start := time.Now()
 
 	var candidates []string
@@ -487,14 +472,9 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 		fmt.Printf("\nTombstones pruned: %d expired (older than %d days)\n",
 			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
 	}
-
-	// Schedule auto-flush to export changes
-	if successCount > 0 {
-		markDirtyAndScheduleFlush()
-	}
 }
 
-func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
+func runCompactStats(ctx context.Context, store storage.CompactableStorage) {
 	tier1, err := store.GetTier1Candidates(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to get Tier 1 candidates: %v\n", err)
@@ -548,7 +528,7 @@ func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
 	}
 }
 
-func runCompactAnalyze(ctx context.Context, store *sqlite.SQLiteStorage) {
+func runCompactAnalyze(ctx context.Context, store storage.CompactableStorage) {
 	type Candidate struct {
 		ID                 string `json:"id"`
 		Title              string `json:"title"`
@@ -653,7 +633,7 @@ func runCompactAnalyze(ctx context.Context, store *sqlite.SQLiteStorage) {
 	fmt.Printf("Total: %d candidates\n", len(candidates))
 }
 
-func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
+func runCompactApply(ctx context.Context, store storage.CompactableStorage) {
 	start := time.Now()
 
 	// Read summary
@@ -784,9 +764,6 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 		fmt.Printf("\nTombstones pruned: %d expired tombstones (older than %d days) removed\n",
 			tombstonePruneResult.PrunedCount, tombstonePruneResult.TTLDays)
 	}
-
-	// Schedule auto-flush to export changes
-	markDirtyAndScheduleFlush()
 }
 
 // runCompactDolt runs Dolt garbage collection on the .beads/dolt directory
@@ -871,13 +848,13 @@ func runCompactDolt() {
 
 	if jsonOutput {
 		result := map[string]interface{}{
-			"success":          true,
-			"dolt_path":        doltPath,
-			"size_before":      sizeBefore,
-			"size_after":       sizeAfter,
-			"freed_bytes":      freed,
-			"freed_display":    formatBytes(freed),
-			"elapsed_ms":       elapsed.Milliseconds(),
+			"success":       true,
+			"dolt_path":     doltPath,
+			"size_before":   sizeBefore,
+			"size_after":    sizeAfter,
+			"freed_bytes":   freed,
+			"freed_display": formatBytes(freed),
+			"elapsed_ms":    elapsed.Milliseconds(),
 		}
 		outputJSON(result)
 		return

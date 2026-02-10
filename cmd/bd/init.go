@@ -345,7 +345,12 @@ variable.`,
 		if backend == configfile.BackendDolt {
 			// Dolt uses a directory, not a file
 			storagePath = filepath.Join(beadsDir, "dolt")
-			store, err = factory.New(ctx, backend, storagePath)
+			// Use prefix-based database name to avoid cross-rig contamination (bd-u8rda)
+			dbName := "beads"
+			if prefix != "" {
+				dbName = "beads_" + prefix
+			}
+			store, err = factory.NewWithOptions(ctx, backend, storagePath, factory.Options{Database: dbName})
 		} else {
 			storagePath = initDBPath
 			store, err = sqlite.New(ctx, storagePath)
@@ -441,6 +446,12 @@ variable.`,
 			if backend == configfile.BackendDolt {
 				if cfg.Database == "" || cfg.Database == beads.CanonicalDatabaseName {
 					cfg.Database = "dolt"
+				}
+
+				// Set prefix-based SQL database name to avoid cross-rig contamination (bd-u8rda).
+				// E.g., prefix "gt" → database "beads_gt", prefix "bd" → database "beads_bd".
+				if prefix != "" {
+					cfg.DoltDatabase = "beads_" + prefix
 				}
 
 				// Save server mode configuration (bd-dolt.2.2)
@@ -745,7 +756,7 @@ func init() {
 	// Dolt server mode flags (bd-dolt.2.2)
 	initCmd.Flags().Bool("server", false, "Explicitly configure Dolt in server mode for high-concurrency (default: embedded)")
 	initCmd.Flags().String("server-host", "", "Dolt server host (default: 127.0.0.1)")
-	initCmd.Flags().Int("server-port", 0, "Dolt server port (default: 3306)")
+	initCmd.Flags().Int("server-port", 0, "Dolt server port (default: 3307)")
 	initCmd.Flags().String("server-user", "", "Dolt server MySQL user (default: root)")
 
 	rootCmd.AddCommand(initCmd)
@@ -888,8 +899,22 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 
 	// Check for existing database (SQLite or Dolt)
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		// For Dolt, check both the local directory AND server mode config.
+		// In server mode the local dolt/ directory may be empty — the database
+		// lives on the Dolt sql-server. Checking only the directory would miss
+		// server-mode installations and allow re-init to create SQLite.
 		doltPath := filepath.Join(beadsDir, "dolt")
+		doltDirExists := false
 		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
+			doltDirExists = true
+		}
+		if doltDirExists || cfg.IsDoltServerMode() {
+			location := doltPath
+			if cfg.IsDoltServerMode() {
+				host := cfg.GetDoltServerHost()
+				port := cfg.GetDoltServerPort()
+				location = fmt.Sprintf("dolt server at %s:%d", host, port)
+			}
 			return fmt.Errorf(`
 %s Found existing Dolt database: %s
 
@@ -901,7 +926,7 @@ To use the existing database:
 To completely reinitialize (data loss warning):
   rm -rf %s && bd init --backend dolt --prefix %s
 
-Aborting.`, ui.RenderWarn("⚠"), doltPath, ui.RenderAccent("bd list"), beadsDir, prefix)
+Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), beadsDir, prefix)
 		}
 	}
 

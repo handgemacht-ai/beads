@@ -26,12 +26,12 @@ var variablePattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
 
 // TemplateSubgraph holds a template epic and all its descendants
 type TemplateSubgraph struct {
-	Root         *types.Issue                // The template epic
-	Issues       []*types.Issue              // All issues in the subgraph (including root)
-	Dependencies []*types.Dependency         // All dependencies within the subgraph
-	IssueMap     map[string]*types.Issue     // ID -> Issue for quick lookup
-	VarDefs      map[string]formula.VarDef   // Variable definitions from formula (for defaults)
-	Phase        string                      // Recommended phase: "liquid" (pour) or "vapor" (wisp)
+	Root         *types.Issue              // The template epic
+	Issues       []*types.Issue            // All issues in the subgraph (including root)
+	Dependencies []*types.Dependency       // All dependencies within the subgraph
+	IssueMap     map[string]*types.Issue   // ID -> Issue for quick lookup
+	VarDefs      map[string]formula.VarDef // Variable definitions from formula (for defaults)
+	Phase        string                    // Recommended phase: "liquid" (pour) or "vapor" (wisp)
 }
 
 // InstantiateResult holds the result of template instantiation
@@ -47,7 +47,7 @@ type CloneOptions struct {
 	Assignee  string            // Assign the root epic to this agent/user
 	Actor     string            // Actor performing the operation
 	Ephemeral bool              // If true, spawned issues are marked for bulk deletion
-	Prefix   string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
+	Prefix    string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
 
 	// Dynamic bonding fields (for Christmas Ornament pattern)
 	ParentID string // Parent molecule ID to bond under (e.g., "patrol-x7k")
@@ -84,24 +84,7 @@ var templateListCmd = &cobra.Command{
 		ctx := rootCtx
 		var beadsTemplates []*types.Issue
 
-		if daemonClient != nil {
-			resp, err := daemonClient.List(&rpc.ListArgs{})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
-				os.Exit(1)
-			}
-			var allIssues []*types.Issue
-			if err := json.Unmarshal(resp.Data, &allIssues); err == nil {
-				for _, issue := range allIssues {
-					for _, label := range issue.Labels {
-						if label == BeadsTemplateLabel {
-							beadsTemplates = append(beadsTemplates, issue)
-							break
-						}
-					}
-				}
-			}
-		} else if store != nil {
+		if store != nil {
 			var err error
 			beadsTemplates, err = store.GetIssuesByLabel(ctx, BeadsTemplateLabel)
 			if err != nil {
@@ -150,18 +133,7 @@ var templateShowCmd = &cobra.Command{
 		ctx := rootCtx
 		var templateID string
 
-		if daemonClient != nil {
-			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
-			resp, err := daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: template '%s' not found\n", args[0])
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &templateID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else if store != nil {
+		if store != nil {
 			var err error
 			templateID, err = utils.ResolvePartialID(ctx, store, args[0])
 			if err != nil {
@@ -176,11 +148,7 @@ var templateShowCmd = &cobra.Command{
 		// Load and show Beads template
 		var subgraph *TemplateSubgraph
 		var err error
-		if daemonClient != nil {
-			subgraph, err = loadTemplateSubgraphViaDaemon(daemonClient, templateID)
-		} else {
-			subgraph, err = loadTemplateSubgraph(ctx, store, templateID)
-		}
+		subgraph, err = loadTemplateSubgraph(ctx, store, templateID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading template: %v\n", err)
 			os.Exit(1)
@@ -253,18 +221,7 @@ Example:
 
 		// Resolve template ID
 		var templateID string
-		if daemonClient != nil {
-			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
-			resp, err := daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving template ID %s: %v\n", args[0], err)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &templateID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else if store != nil {
+		if store != nil {
 			var err error
 			templateID, err = utils.ResolvePartialID(ctx, store, args[0])
 			if err != nil {
@@ -325,24 +282,17 @@ Example:
 
 		// Clone the subgraph (deprecated command, non-wisp for backwards compatibility)
 		opts := CloneOptions{
-			Vars:     vars,
-			Assignee: assignee,
-			Actor:    actor,
-			Ephemeral:     false,
+			Vars:      vars,
+			Assignee:  assignee,
+			Actor:     actor,
+			Ephemeral: false,
 		}
 		var result *InstantiateResult
-		if daemonClient != nil {
-			result, err = cloneSubgraphViaDaemon(daemonClient, subgraph, opts)
-		} else {
-			result, err = cloneSubgraph(ctx, store, subgraph, opts)
-		}
+		result, err = cloneSubgraph(ctx, store, subgraph, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error instantiating template: %v\n", err)
 			os.Exit(1)
 		}
-
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
 
 		if jsonOutput {
 			outputJSON(result)
@@ -594,7 +544,7 @@ func resolveProtoIDOrTitle(ctx context.Context, s storage.Storage, input string)
 // IssueDetailsFromShow represents the response structure from daemon Show RPC
 type IssueDetailsFromShow struct {
 	types.Issue
-	Labels       []string                              `json:"labels,omitempty"`
+	Labels       []string                             `json:"labels,omitempty"`
 	Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 	Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
 }
@@ -714,7 +664,7 @@ func cloneSubgraphViaDaemon(client *rpc.Client, subgraph *TemplateSubgraph, opts
 			AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
 			Assignee:           issueAssignee,
 			EstimatedMinutes:   oldIssue.EstimatedMinutes,
-			Ephemeral:               opts.Ephemeral,
+			Ephemeral:          opts.Ephemeral,
 			IDPrefix:           opts.Prefix, // distinct prefixes for mols/wisps
 		}
 
@@ -979,7 +929,7 @@ func cloneSubgraph(ctx context.Context, s storage.Storage, subgraph *TemplateSub
 				Assignee:           issueAssignee,
 				EstimatedMinutes:   oldIssue.EstimatedMinutes,
 				Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
-				IDPrefix:           opts.Prefix,   // distinct prefixes for mols/wisps
+				IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
 				// Gate fields (for async coordination)
 				AwaitType: oldIssue.AwaitType,
 				AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),

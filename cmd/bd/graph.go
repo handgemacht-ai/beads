@@ -2,17 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/factory"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -20,18 +16,18 @@ import (
 
 // GraphNode represents a node in the rendered graph
 type GraphNode struct {
-	Issue    *types.Issue
-	Layer    int      // Horizontal layer (topological order)
-	Position int      // Vertical position within layer
+	Issue     *types.Issue
+	Layer     int      // Horizontal layer (topological order)
+	Position  int      // Vertical position within layer
 	DependsOn []string // IDs this node depends on (blocks dependencies only)
 }
 
 // GraphLayout holds the computed graph layout
 type GraphLayout struct {
-	Nodes      map[string]*GraphNode
-	Layers     [][]string // Layer index -> node IDs in that layer
-	MaxLayer   int
-	RootID     string
+	Nodes    map[string]*GraphNode
+	Layers   [][]string // Layer index -> node IDs in that layer
+	MaxLayer int
+	RootID   string
 }
 
 var (
@@ -75,22 +71,12 @@ Status icons: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred`,
 			os.Exit(1)
 		}
 
-		// If daemon is running but doesn't support this command, use direct storage
-		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
-		if daemonClient != nil && store == nil {
-			var err error
-			store, err = factory.NewFromConfig(ctx, filepath.Dir(dbPath))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
-			}
-			defer func() { _ = store.Close() }()
-		}
-
 		if store == nil {
 			fmt.Fprintf(os.Stderr, "Error: no database connection\n")
 			os.Exit(1)
 		}
+
+		requireFreshDB(ctx)
 
 		// Handle --all flag: show graph for all open issues
 		if graphAll {
@@ -126,25 +112,10 @@ Status icons: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred`,
 		}
 
 		// Single issue mode
-		var issueID string
-		if daemonClient != nil {
-			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
-			resp, err := daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: issue '%s' not found\n", args[0])
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &issueID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			var err error
-			issueID, err = utils.ResolvePartialID(ctx, store, args[0])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: issue '%s' not found\n", args[0])
-				os.Exit(1)
-			}
+		issueID, err := utils.ResolvePartialID(ctx, store, args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: issue '%s' not found\n", args[0])
+			os.Exit(1)
 		}
 
 		// Load the subgraph
@@ -159,9 +130,9 @@ Status icons: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred`,
 
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
-				"root":    subgraph.Root,
-				"issues":  subgraph.Issues,
-				"layout":  layout,
+				"root":   subgraph.Root,
+				"issues": subgraph.Issues,
+				"layout": layout,
 			})
 			return
 		}

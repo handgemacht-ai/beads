@@ -83,12 +83,12 @@ func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Clien
 	if dialTimeout <= 0 {
 		dialTimeout = 200 * time.Millisecond
 	}
-	
+
 	rpcDebugLog("dialing socket (timeout: %v)", dialTimeout)
 	dialStart := time.Now()
 	conn, err := dialRPC(socketPath, dialTimeout)
 	dialDuration := time.Since(dialStart)
-	
+
 	if err != nil {
 		debug.Logf("failed to connect to RPC endpoint: %v", err)
 		rpcDebugLog("dial failed after %v: %v", dialDuration, err)
@@ -104,7 +104,7 @@ func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Clien
 		}
 		return nil, nil
 	}
-	
+
 	rpcDebugLog("dial succeeded in %v", dialDuration)
 
 	client := &Client{
@@ -117,7 +117,7 @@ func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Clien
 	healthStart := time.Now()
 	health, err := client.Health()
 	healthDuration := time.Since(healthStart)
-	
+
 	if err != nil {
 		debug.Logf("health check failed: %v", err)
 		rpcDebugLog("health check failed after %v: %v", healthDuration, err)
@@ -212,11 +212,15 @@ func (c *Client) ExecuteWithCwd(operation string, args interface{}, cwd string) 
 		return nil, fmt.Errorf("failed to flush: %w", err)
 	}
 
-	reader := bufio.NewReader(c.conn)
-	respLine, err := reader.ReadBytes('\n')
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+	scanner := bufio.NewScanner(c.conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxMessageSize)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+		return nil, fmt.Errorf("failed to read response: connection closed")
 	}
+	respLine := scanner.Bytes()
 
 	var resp Response
 	if err := json.Unmarshal(respLine, &resp); err != nil {
@@ -370,6 +374,11 @@ func (c *Client) RemoveDependency(args *DepRemoveArgs) (*Response, error) {
 	return c.Execute(OpDepRemove, args)
 }
 
+// GetDependencyTree retrieves the dependency tree for an issue via the daemon
+func (c *Client) GetDependencyTree(args *DepTreeArgs) (*Response, error) {
+	return c.Execute(OpDepTree, args)
+}
+
 // AddLabel adds a label via the daemon
 func (c *Client) AddLabel(args *LabelAddArgs) (*Response, error) {
 	return c.Execute(OpLabelAdd, args)
@@ -394,8 +403,6 @@ func (c *Client) AddComment(args *CommentAddArgs) (*Response, error) {
 func (c *Client) Batch(args *BatchArgs) (*Response, error) {
 	return c.Execute(OpBatch, args)
 }
-
-
 
 // Export exports the database to JSONL format
 func (c *Client) Export(args *ExportArgs) (*Response, error) {
@@ -484,18 +491,18 @@ func (c *Client) MolStale(args *MolStaleArgs) (*MolStaleResponse, error) {
 // Only removes pid file - lock file is managed by OS (released on process exit).
 func cleanupStaleDaemonArtifacts(beadsDir string) {
 	pidFile := filepath.Join(beadsDir, "daemon.pid")
-	
+
 	// Check if pid file exists
 	if _, err := os.Stat(pidFile); err != nil {
 		// No pid file to clean up
 		return
 	}
-	
+
 	// Remove stale pid file
 	if err := os.Remove(pidFile); err != nil {
 		debug.Logf("failed to remove stale pid file: %v", err)
 		return
 	}
-	
+
 	debug.Logf("removed stale daemon.pid file (lock free, socket missing)")
 }

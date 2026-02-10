@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS issues (
     closed_at DATETIME,
     closed_by_session TEXT DEFAULT '',
     external_ref TEXT,
+    spec_id TEXT,
     compaction_level INTEGER DEFAULT 0,
     compacted_at DATETIME,
     compacted_at_commit TEXT,
@@ -33,6 +34,8 @@ CREATE TABLE IF NOT EXISTS issues (
     -- Messaging fields (bd-kwro)
     sender TEXT DEFAULT '',
     ephemeral INTEGER DEFAULT 0,
+    -- Wisp type for TTL-based compaction (gt-9br)
+    wisp_type TEXT DEFAULT '',
     -- Pinned field (bd-7h5)
     pinned INTEGER DEFAULT 0,
     -- Template field (beads-1ra)
@@ -69,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority);
 CREATE INDEX IF NOT EXISTS idx_issues_assignee ON issues(assignee);
 CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
 -- Note: idx_issues_external_ref is created in migrations/002_external_ref_column.go
+-- Note: idx_issues_spec_id is created in migrations/041_spec_id_column.go
 
 -- Dependencies table (edge schema - Decision 004)
 CREATE TABLE IF NOT EXISTS dependencies (
@@ -145,7 +149,7 @@ INSERT OR IGNORE INTO config (key, value) VALUES
     ('compact_tier2_days', '90'),
     ('compact_tier2_dep_levels', '5'),
     ('compact_tier2_commits', '100'),
-    ('compact_model', 'claude-3-5-haiku-20241022'),
+    ('compact_model', 'claude-haiku-4-5-20251001'),
     ('compact_batch_size', '50'),
     ('compact_parallel_workers', '5'),
     ('auto_compact_enabled', 'false');

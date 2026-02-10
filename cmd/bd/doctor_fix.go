@@ -138,6 +138,10 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 		response, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+			if len(approvedFixes) > 0 {
+				fmt.Printf("\nApplying %d previously approved fix(es) before exit...\n", len(approvedFixes))
+				applyFixList(path, approvedFixes)
+			}
 			return
 		}
 
@@ -233,8 +237,6 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = doctor.FixLastTouchedTracking()
 		case "Git Hooks":
 			err = fix.GitHooks(path)
-		case "Daemon Health":
-			err = fix.Daemon(path)
 		case "DB-JSONL Sync":
 			err = fix.DBJSONLSync(path)
 		case "Sync Divergence":

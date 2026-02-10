@@ -106,7 +106,7 @@ func TestShouldExportJSONL(t *testing.T) {
 	}{
 		{SyncModeGitPortable, true},
 		{SyncModeRealtime, true},
-		{SyncModeDoltNative, true},
+		{SyncModeDoltNative, false}, // dolt-native uses Dolt remotes, not JSONL
 		{SyncModeBeltAndSuspenders, true},
 	}
 
@@ -119,6 +119,84 @@ func TestShouldExportJSONL(t *testing.T) {
 			got := ShouldExportJSONL(ctx, testStore)
 			if got != tt.wantExport {
 				t.Errorf("ShouldExportJSONL() = %v, want %v", got, tt.wantExport)
+			}
+		})
+	}
+}
+
+// TestShouldExportJSONL_UsesGetSyncMode verifies ShouldExportJSONL uses GetSyncMode
+// (which checks config.yaml first, then DB). This ensures that sync.mode set in
+// config.yaml is respected even when not propagated to the database — fixing the
+// bug where dolt-native workspaces paid 10-25s JSONL export overhead (bd-6fiwk).
+func TestShouldExportJSONL_UsesGetSyncMode(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	testStore, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer testStore.Close()
+
+	// Set dolt-native in database — ShouldExportJSONL must return false
+	if err := testStore.SetConfig(ctx, SyncModeConfigKey, SyncModeDoltNative); err != nil {
+		t.Fatalf("failed to set config: %v", err)
+	}
+	if ShouldExportJSONL(ctx, testStore) {
+		t.Error("ShouldExportJSONL() = true, want false for dolt-native in DB")
+	}
+
+	// Default (no config set) should return true
+	if err := testStore.SetConfig(ctx, SyncModeConfigKey, ""); err != nil {
+		t.Fatalf("failed to clear config: %v", err)
+	}
+	if !ShouldExportJSONL(ctx, testStore) {
+		t.Error("ShouldExportJSONL() = false, want true for default (no config)")
+	}
+}
+
+// TestShouldImportJSONL verifies JSONL import behavior per mode.
+func TestShouldImportJSONL(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	dbPath := filepath.Join(beadsDir, "beads.db")
+	testStore, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer testStore.Close()
+
+	tests := []struct {
+		mode       string
+		wantImport bool
+	}{
+		{SyncModeGitPortable, true},
+		{SyncModeRealtime, true},
+		{SyncModeDoltNative, false},
+		{SyncModeBeltAndSuspenders, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			if err := SetSyncMode(ctx, testStore, tt.mode); err != nil {
+				t.Fatalf("failed to set mode: %v", err)
+			}
+
+			got := ShouldImportJSONL(ctx, testStore)
+			if got != tt.wantImport {
+				t.Errorf("ShouldImportJSONL() = %v, want %v", got, tt.wantImport)
 			}
 		})
 	}

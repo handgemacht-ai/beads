@@ -39,6 +39,9 @@ func (m *mockStorage) GetIssueByExternalRef(ctx context.Context, externalRef str
 func (m *mockStorage) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	return nil
 }
+func (m *mockStorage) ClaimIssue(ctx context.Context, id string, actor string) error {
+	return nil
+}
 func (m *mockStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	return nil
 }
@@ -198,6 +201,12 @@ func (m *mockStorage) SetMetadata(ctx context.Context, key, value string) error 
 func (m *mockStorage) GetMetadata(ctx context.Context, key string) (string, error) {
 	return "", nil
 }
+func (m *mockStorage) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
+	return 0, nil
+}
+func (m *mockStorage) ClearRepoMtime(ctx context.Context, repoPath string) error {
+	return nil
+}
 func (m *mockStorage) UpdateIssueID(ctx context.Context, oldID, newID string, issue *types.Issue, actor string) error {
 	return nil
 }
@@ -334,6 +343,7 @@ func TestInterfaceDocumentation(t *testing.T) {
 		_ = s.GetIssue
 		_ = s.GetIssueByExternalRef
 		_ = s.UpdateIssue
+		_ = s.ClaimIssue
 		_ = s.CloseIssue
 		_ = s.DeleteIssue
 		_ = s.SearchIssues
@@ -399,6 +409,10 @@ func TestInterfaceDocumentation(t *testing.T) {
 		// Verify metadata operations
 		_ = s.SetMetadata
 		_ = s.GetMetadata
+
+		// Verify multi-repo cleanup operations
+		_ = s.DeleteIssuesBySourceRepo
+		_ = s.ClearRepoMtime
 
 		// Verify prefix rename operations
 		_ = s.UpdateIssueID

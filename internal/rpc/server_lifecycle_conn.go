@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -97,7 +98,9 @@ func (s *Server) Start(_ context.Context) error {
 		case s.connSemaphore <- struct{}{}:
 			// Acquired slot, handle connection
 			s.metrics.RecordConnection()
+			s.connWg.Add(1)
 			go func(c net.Conn) {
+				defer s.connWg.Done()
 				defer func() { <-s.connSemaphore }() // Release slot
 				atomic.AddInt32(&s.activeConns, 1)
 				defer atomic.AddInt32(&s.activeConns, -1)
@@ -127,14 +130,7 @@ func (s *Server) Stop() error {
 		// Signal cleanup goroutine to stop
 		close(s.shutdownChan)
 
-		// Close storage
-		if s.storage != nil {
-			if closeErr := s.storage.Close(); closeErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to close default storage: %v\n", closeErr)
-			}
-		}
-
-		// Close listener under lock
+		// Close listener first to stop accepting new connections
 		s.mu.Lock()
 		listener := s.listener
 		s.listener = nil
@@ -143,7 +139,26 @@ func (s *Server) Stop() error {
 		if listener != nil {
 			if closeErr := listener.Close(); closeErr != nil {
 				err = fmt.Errorf("failed to close listener: %w", closeErr)
-				return
+			}
+		}
+
+		// Wait for in-flight connection goroutines to drain (with timeout)
+		drainDone := make(chan struct{})
+		go func() {
+			s.connWg.Wait()
+			close(drainDone)
+		}()
+		select {
+		case <-drainDone:
+			// All connections drained cleanly
+		case <-time.After(5 * time.Second):
+			// Timeout waiting for connections to drain - proceed with shutdown
+		}
+
+		// Close storage after in-flight requests complete
+		if s.storage != nil {
+			if closeErr := s.storage.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to close default storage: %v\n", closeErr)
 			}
 		}
 
@@ -200,8 +215,8 @@ func (s *Server) handleSignals() {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	defer func() { 
-		_ = conn.Close() 
+	defer func() {
+		_ = conn.Close()
 	}()
 
 	// Recover from panics to prevent daemon crash (bd-1048)
@@ -212,7 +227,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}()
 
-	reader := bufio.NewReader(conn)
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxMessageSize)
+	scanner.Split(scanCompleteLines)
 	writer := bufio.NewWriter(conn)
 
 	for {
@@ -221,10 +238,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
+		if !scanner.Scan() {
 			return
 		}
+		line := scanner.Bytes()
 
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
@@ -247,6 +264,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 		resp := s.handleRequest(&req)
 		if err := s.writeResponse(writer, resp); err != nil {
 			// Connection broken, stop handling this connection
+			return
+		}
+
+		// If shutdown was requested, trigger it now that the response has been written
+		if s.pendingShutdown.Load() {
+			go func() {
+				if err := s.Stop(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error during shutdown: %v\n", err)
+				}
+			}()
 			return
 		}
 	}
@@ -273,14 +300,24 @@ func (s *Server) writeResponse(writer *bufio.Writer, resp Response) error {
 	return nil
 }
 
-func (s *Server) handleShutdown(_ *Request) Response {
-	// Schedule shutdown in a goroutine so we can return a response first
-	go func() {
-		time.Sleep(100 * time.Millisecond) // Give time for response to be sent
-		if err := s.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error during shutdown: %v\n", err)
+// scanCompleteLines is a bufio.SplitFunc that only returns complete newline-terminated
+// lines. Unlike bufio.ScanLines, it does NOT return partial data on EOF/timeout,
+// ensuring that read deadline expiry causes the scanner to return false immediately
+// rather than yielding an incomplete message for processing.
+func scanCompleteLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		line := data[0:i]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
 		}
-	}()
+		return i + 1, line, nil
+	}
+	return 0, nil, nil
+}
+
+func (s *Server) handleShutdown(_ *Request) Response {
+	// Signal pending shutdown - handleConnection will trigger Stop() after writing the response
+	s.pendingShutdown.Store(true)
 
 	return Response{
 		Success: true,

@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -160,6 +161,16 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		whereClauses = append(whereClauses, "id LIKE ?")
 		args = append(args, filter.IDPrefix+"%")
 	}
+	if filter.SpecIDPrefix != "" {
+		whereClauses = append(whereClauses, "spec_id LIKE ?")
+		args = append(args, filter.SpecIDPrefix+"%")
+	}
+
+	// Source repo filtering
+	if filter.SourceRepo != nil {
+		whereClauses = append(whereClauses, "source_repo = ?")
+		args = append(args, *filter.SourceRepo)
+	}
 
 	// Wisp filtering
 	if filter.Ephemeral != nil {
@@ -188,16 +199,24 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		}
 	}
 
-	// Parent filtering
+	// Parent filtering: filter children by parent issue
+	// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent")
 	if filter.ParentID != nil {
-		whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?)")
-		args = append(args, *filter.ParentID)
+		parentID := *filter.ParentID
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE CONCAT(?, '.%'))")
+		args = append(args, parentID, parentID)
 	}
 
 	// Molecule type filtering
 	if filter.MolType != nil {
 		whereClauses = append(whereClauses, "mol_type = ?")
 		args = append(args, string(*filter.MolType))
+	}
+
+	// Wisp type filtering (TTL-based compaction classification)
+	if filter.WispType != nil {
+		whereClauses = append(whereClauses, "wisp_type = ?")
+		args = append(args, string(*filter.WispType))
 	}
 
 	// Time-based scheduling filters
@@ -227,7 +246,7 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 		%s
 	`, whereSQL, limitSQL)
 
-	rows, err := s.db.QueryContext(ctx, querySQL, args...)
+	rows, err := s.queryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -293,7 +312,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		%s
 	`, whereSQL, limitSQL)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get ready work: %w", err)
 	}
@@ -302,95 +321,93 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	return s.scanIssueIDs(ctx, rows)
 }
 
-// GetBlockedIssues returns issues that are blocked by other issues
+// GetBlockedIssues returns issues that are blocked by other issues.
+// Uses separate single-table queries with Go-level filtering to avoid
+// correlated EXISTS subqueries that trigger Dolt's joinIter panic
+// (slice bounds out of range at join_iters.go:192).
+// Same fix pattern as GetStatistics blocked count (fc16065c, a4a21958).
 func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Use correlated subquery to avoid three-table merge join (Dolt mergeJoinIter panic)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT i.id,
-		  (SELECT COUNT(*)
-		   FROM dependencies d
-		   WHERE d.issue_id = i.id
-		     AND d.type = 'blocks'
-		     AND EXISTS (
-		       SELECT 1 FROM issues blocker
-		       WHERE blocker.id = d.depends_on_id
-		         AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-		     )
-		  ) as blocked_by_count
-		FROM issues i
-		WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-		  AND EXISTS (
-		    SELECT 1 FROM dependencies d
-		    WHERE d.issue_id = i.id
-		      AND d.type = 'blocks'
-		      AND EXISTS (
-		        SELECT 1 FROM issues blocker
-		        WHERE blocker.id = d.depends_on_id
-		          AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-		      )
-		  )
-		ORDER BY i.priority ASC, i.created_at DESC
+	// Step 1: Get all open/active issue IDs into a set (single-table scan)
+	activeIDs := make(map[string]bool)
+	activeRows, err := s.queryContext(ctx, `
+		SELECT id FROM issues
+		WHERE status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get blocked issues: %w", err)
+		return nil, fmt.Errorf("failed to get active issues: %w", err)
 	}
-	defer rows.Close()
-
-	var results []*types.BlockedIssue
-	for rows.Next() {
+	for activeRows.Next() {
 		var id string
-		var count int
-		if err := rows.Scan(&id, &count); err != nil {
+		if err := activeRows.Scan(&id); err != nil {
+			_ = activeRows.Close()
 			return nil, err
 		}
+		activeIDs[id] = true
+	}
+	_ = activeRows.Close()
+	if err := activeRows.Err(); err != nil {
+		return nil, err
+	}
 
+	// Step 2: Get all blocking dependencies (single-table scan)
+	depRows, err := s.queryContext(ctx, `
+		SELECT issue_id, depends_on_id FROM dependencies
+		WHERE type = 'blocks'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get blocking dependencies: %w", err)
+	}
+
+	// Step 3: Filter in Go — both sides must be active
+	// blockerMap: blocked_issue_id -> list of active blocker IDs
+	blockerMap := make(map[string][]string)
+	for depRows.Next() {
+		var issueID, blockerID string
+		if err := depRows.Scan(&issueID, &blockerID); err != nil {
+			_ = depRows.Close()
+			return nil, err
+		}
+		if activeIDs[issueID] && activeIDs[blockerID] {
+			blockerMap[issueID] = append(blockerMap[issueID], blockerID)
+		}
+	}
+	_ = depRows.Close()
+	if err := depRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Step 4: Hydrate blocked issues and build results
+	var results []*types.BlockedIssue
+	for id, blockerIDs := range blockerMap {
 		issue, err := s.GetIssue(ctx, id)
 		if err != nil || issue == nil {
 			continue
 		}
 
-		// Get blocker IDs
-		var blockerIDs []string
-		blockerRows, err := s.db.QueryContext(ctx, `
-			SELECT d.depends_on_id
-			FROM dependencies d
-			WHERE d.issue_id = ?
-			  AND d.type = 'blocks'
-			  AND EXISTS (
-			    SELECT 1 FROM issues blocker
-			    WHERE blocker.id = d.depends_on_id
-			      AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-			  )
-		`, id)
-		if err != nil {
-			return nil, err
-		}
-		for blockerRows.Next() {
-			var blockerID string
-			if err := blockerRows.Scan(&blockerID); err != nil {
-				_ = blockerRows.Close() // nolint:gosec // G104: error ignored on early return
-				return nil, err
-			}
-			blockerIDs = append(blockerIDs, blockerID)
-		}
-		_ = blockerRows.Close() // nolint:gosec // G104: rows already read successfully
-
 		results = append(results, &types.BlockedIssue{
 			Issue:          *issue,
-			BlockedByCount: count,
+			BlockedByCount: len(blockerIDs),
 			BlockedBy:      blockerIDs,
 		})
 	}
 
-	return results, rows.Err()
+	// Sort by priority ASC, then created_at DESC (matching original SQL ORDER BY)
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Issue.Priority != results[j].Issue.Priority {
+			return results[i].Issue.Priority < results[j].Issue.Priority
+		}
+		return results[i].Issue.CreatedAt.After(results[j].Issue.CreatedAt)
+	})
+
+	return results, nil
 }
 
 // GetEpicsEligibleForClosure returns epics whose children are all closed
 func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryContext(ctx, `
 		SELECT e.id,
 		       (SELECT COUNT(*) FROM dependencies d JOIN issues c ON d.issue_id = c.id
 		        WHERE d.depends_on_id = e.id AND d.type = 'parent-child') as total_children,
@@ -457,7 +474,7 @@ func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stale issues: %w", err)
 	}
@@ -500,7 +517,7 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 	// Step 1: Get IDs of open blockers
 	// Step 2: Count distinct blocked issues from those blockers
 	var blockedCount int
-	blockerRows, err := s.db.QueryContext(ctx, `
+	blockerRows, err := s.queryContext(ctx, `
 		SELECT DISTINCT d.issue_id
 		FROM dependencies d
 		WHERE d.type = 'blocks'
