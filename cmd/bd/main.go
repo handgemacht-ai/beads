@@ -80,6 +80,9 @@ var (
 	verboseFlag     bool // Enable verbose/debug output
 	quietFlag       bool // Suppress non-essential output
 
+	// Backwards-compatible no-op: daemon was removed in v0.49.x but gt still passes this flag
+	noDaemonCompat bool
+
 	// Dolt auto-commit policy (flag/config). Values: off | on
 	doltAutoCommit string
 
@@ -211,6 +214,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
+	rootCmd.PersistentFlags().BoolVar(&noDaemonCompat, "no-daemon", false, "No-op (daemon removed in v0.49.x, kept for backwards compatibility)")
+	rootCmd.PersistentFlags().MarkHidden("no-daemon")
 
 	// Add --version flag to root command (same behavior as version subcommand)
 	rootCmd.Flags().BoolP("version", "V", false, "Print version information")
